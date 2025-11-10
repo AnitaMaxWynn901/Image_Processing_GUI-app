@@ -8,6 +8,14 @@ from PIL import Image, ImageTk
 from modules import module1_enhance as M1
 from modules import module2_segment as M2
 from modules import module3_transform as M3
+from modules import module4_action as M4
+
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"   # silence TensorFlow logs
+import absl.logging
+absl.logging.set_verbosity(absl.logging.ERROR)
+
+
 
 def cv_to_pil(img_bgr):
     if img_bgr is None:
@@ -17,6 +25,7 @@ def cv_to_pil(img_bgr):
     else:
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     return Image.fromarray(img_rgb)
+
 
 class App(Tk):
     def __init__(self):
@@ -28,11 +37,12 @@ class App(Tk):
         self.reference = None
         self.result = None
 
-        # NEW: fixed preview box for both panes (prevents “getting bigger”)
-        self.display_box = (560, 560)  # (width, height) in pixels for preview
+        # fixed preview box (prevents panel growth)
+        self.display_box = (560, 560)
 
         self._build_layout()
 
+    # ---------- UI ----------
     def _build_layout(self):
         top = Frame(self)
         top.pack(side=TOP, fill=X)
@@ -41,6 +51,7 @@ class App(Tk):
         Button(top, text="Load Reference (for Hist Match)", command=self.load_reference).pack(side=LEFT, padx=5, pady=5)
         Button(top, text="Save Result", command=self.save_result).pack(side=LEFT, padx=5, pady=5)
         Button(top, text="Clear Result", command=self.clear_result).pack(side=LEFT, padx=5, pady=5)
+        Button(top, text="Reset to Original", command=self.reset_to_original).pack(side=LEFT, padx=5, pady=5)
 
         self.status = StringVar(value="Ready")
         Label(top, textvariable=self.status).pack(side=RIGHT, padx=10)
@@ -60,11 +71,49 @@ class App(Tk):
         tabs.add(self._build_module1(tabs), text="Module 1 — Enhancement")
         tabs.add(self._build_module2(tabs), text="Module 2 — Segmentation & Edges")
         tabs.add(self._build_module3(tabs), text="Module 3 — Geometric & Interp")
+        tabs.add(self._build_module4(tabs), text="Module 4 — Human Action Recognition")
 
-    # Image I/O
+    # ---------- Helpers ----------
+    def _require_image(self):
+        if self.original is None:
+            messagebox.showwarning("Missing Image", "Load an image first.")
+            return False
+        return True
+
+    def _fit_to_panel(self, pil_img, label):
+        bw, bh = self.display_box
+        w, h = pil_img.size
+        scale = min(bw / max(1, w), bh / max(1, h))
+        new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
+        return pil_img.copy().resize((new_w, new_h), Image.LANCZOS)
+
+    def _refresh_panels(self):
+        # left: original
+        if self.original is not None:
+            pil = self._fit_to_panel(cv_to_pil(self.original), self.left_label)
+            self.left_imgtk = ImageTk.PhotoImage(pil)
+            self.left_label.configure(image=self.left_imgtk, text="")
+        else:
+            self.left_label.configure(image="", text="Original")
+
+        # right: result
+        if self.result is not None:
+            disp = cv2.cvtColor(self.result, cv2.COLOR_GRAY2BGR) if self.result.ndim == 2 else self.result
+            pil = self._fit_to_panel(cv_to_pil(disp), self.right_label)
+            self.right_imgtk = ImageTk.PhotoImage(pil)
+            self.right_label.configure(image=self.right_imgtk, text="")
+        else:
+            self.right_label.configure(image="", text="Result")
+
+    # ---------- I/O ----------
     def load_image(self):
-        path = filedialog.askopenfilename(title="Choose image",
-                                          filetypes=[("Images","*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff")])
+        path = filedialog.askopenfilename(
+            title="Choose image",
+            filetypes=[
+                ("Image Files", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.PNG *.JPG *.JPEG *.BMP *.TIF *.TIFF"),
+                ("All files", "*.*"),
+            ],
+        )
         if not path:
             return
         img = cv2.imread(path, cv2.IMREAD_COLOR)
@@ -77,8 +126,13 @@ class App(Tk):
         self.status.set(f"Loaded: {os.path.basename(path)}")
 
     def load_reference(self):
-        path = filedialog.askopenfilename(title="Choose reference",
-                                          filetypes=[("Images","*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff")])
+        path = filedialog.askopenfilename(
+            title="Choose reference",
+            filetypes=[
+                ("Image Files", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.PNG *.JPG *.JPEG *.BMP *.TIF *.TIFF"),
+                ("All files", "*.*"),
+            ],
+        )
         if not path:
             return
         img = cv2.imread(path, cv2.IMREAD_COLOR)
@@ -92,11 +146,13 @@ class App(Tk):
         if self.result is None:
             messagebox.showinfo("Info", "No result to save.")
             return
-        path = filedialog.asksaveasfilename(defaultextension=".png",
-                                            filetypes=[("PNG","*.png"),("JPG","*.jpg;*.jpeg"),("BMP","*.bmp")])
+        path = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("PNG", "*.png"), ("JPG", "*.jpg;*.jpeg"), ("BMP", "*.bmp")],
+        )
         if not path:
             return
-        cv2.imwrite(path, self.result if self.result.ndim == 3 else self.result)
+        cv2.imwrite(path, self.result)
         self.status.set(f"Saved: {os.path.basename(path)}")
 
     def clear_result(self):
@@ -104,48 +160,13 @@ class App(Tk):
         self._refresh_panels()
         self.status.set("Result cleared")
 
-    def _refresh_panels(self):
-        # Left (Original) — always fit to fixed display box
+    def reset_to_original(self):
         if self.original is not None:
-            pil = cv_to_pil(self.original)
-            pil = self._fit_to_panel(pil, self.left_label)
-            self.left_imgtk = ImageTk.PhotoImage(pil)
-            self.left_label.configure(image=self.left_imgtk)
-        else:
-            self.left_label.configure(image="", text="Original")
+            self.result = self.original.copy()
+            self._refresh_panels()
+            self.status.set("Reset to original")
 
-        # Right (Result) — always fit to fixed display box
-        if self.result is not None:
-            if self.result.ndim == 2:
-                disp = cv2.cvtColor(self.result, cv2.COLOR_GRAY2BGR)
-            else:
-                disp = self.result
-            pil = cv_to_pil(disp)
-            pil = self._fit_to_panel(pil, self.right_label)
-            self.right_imgtk = ImageTk.PhotoImage(pil)
-            self.right_label.configure(image=self.right_imgtk)
-        else:
-            self.right_label.configure(image="", text="Result")
-
-    def _fit_to_panel(self, pil_img, label):
-        """
-        Resize PIL image to fit inside a fixed box (self.display_box),
-        preserving aspect ratio. Ignores the label's current size so the
-        preview never "grows" between operations.
-        """
-        bw, bh = self.display_box
-        w, h = pil_img.size
-        scale = min(bw / max(1, w), bh / max(1, h))
-        new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
-        return pil_img.copy().resize((new_w, new_h), Image.LANCZOS)
-
-    def _require_image(self):
-        if self.original is None:
-            messagebox.showwarning("Missing Image", "Load an image first.")
-            return False
-        return True
-
-    # Module 1
+    # ---------- Module 1 ----------
     def _build_module1(self, parent):
         frm = Frame(parent)
 
@@ -203,7 +224,8 @@ class App(Tk):
 
     def _m1_bright_contrast(self):
         if not self._require_image(): return
-        self.result = M1.adjust_brightness_contrast(self.original.copy(), float(self.alpha.get()), int(self.beta.get()))
+        self.result = M1.adjust_brightness_contrast(self.original.copy(),
+                                                    float(self.alpha.get()), int(self.beta.get()))
         self._refresh_panels()
 
     def _m1_mean(self):
@@ -212,16 +234,13 @@ class App(Tk):
         self._refresh_panels()
 
     def _m1_median(self):
-        if not self._require_image():
-            return
+        if not self._require_image(): return
         k = int(self.ksize.get())
-        # make sure the kernel size is odd and >= 3
         if k % 2 == 0:
             k += 1
         k = max(3, k)
         self.result = M1.median_filter(self.original.copy(), k)
         self._refresh_panels()
-
 
     def _m1_laplacian(self):
         if not self._require_image(): return
@@ -248,7 +267,7 @@ class App(Tk):
         self.result = M1.freq_bandpass(self.original.copy(), int(self.dlow.get()), int(self.dhigh.get()))
         self._refresh_panels()
 
-    # Module 2
+    # ---------- Module 2 ----------
     def _build_module2(self, parent):
         frm = Frame(parent)
 
@@ -269,7 +288,7 @@ class App(Tk):
         self.morph_op = StringVar(value="dilate")
         self.morph_ks = IntVar(value=3)
         self.morph_it = IntVar(value=1)
-        ttk.Combobox(r2, values=["dilate","erode","open","close"], textvariable=self.morph_op, width=8).pack(side=LEFT)
+        ttk.Combobox(r2, values=["dilate", "erode", "open", "close"], textvariable=self.morph_op, width=8).pack(side=LEFT)
         Spinbox(r2, from_=1, to=31, increment=2, textvariable=self.morph_ks, width=6).pack(side=LEFT, padx=4)
         Spinbox(r2, from_=1, to=10, textvariable=self.morph_it, width=6).pack(side=LEFT, padx=4)
         Button(r2, text="Apply", command=self._m2_morph).pack(side=LEFT, padx=3)
@@ -298,7 +317,8 @@ class App(Tk):
 
     def _m2_canny(self):
         if not self._require_image(): return
-        self.result = M2.canny_edges(self.original.copy(), int(self.canny_t1.get()), int(self.canny_t2.get()))
+        self.result = M2.canny_edges(self.original.copy(),
+                                     int(self.canny_t1.get()), int(self.canny_t2.get()))
         self._refresh_panels()
 
     def _m2_otsu(self):
@@ -308,17 +328,24 @@ class App(Tk):
 
     def _m2_morph(self):
         if not self._require_image(): return
-        self.result = M2.morphology(self.original.copy(), self.morph_op.get(), int(self.morph_ks.get()), int(self.morph_it.get()))
+        self.result = M2.morphology(self.original.copy(), self.morph_op.get(),
+                                    int(self.morph_ks.get()), int(self.morph_it.get()))
         self._refresh_panels()
 
     def _m2_hsv_seg(self):
         if not self._require_image(): return
-        lower = (int(self.hlow.get()), int(self.smin.get()), int(self.vmin.get()))
-        upper = (int(self.hhigh.get()), 255, 255)
+        hlow = int(self.hlow.get())
+        hhigh = int(self.hhigh.get())
+        smin = int(self.smin.get())
+        vmin = int(self.vmin.get())
+        if hlow > hhigh:
+            hlow, hhigh = hhigh, hlow
+        lower = (hlow, smin, vmin)
+        upper = (hhigh, 255, 255)
         self.result = M2.color_segmentation_hsv(self.original.copy(), lower, upper)
         self._refresh_panels()
 
-    # Module 3
+    # ---------- Module 3 ----------
     def _build_module3(self, parent):
         frm = Frame(parent)
 
@@ -334,7 +361,7 @@ class App(Tk):
         Spinbox(r1, from_=0.1, to=4.0, increment=0.1, textvariable=self.sx, width=6).pack(side=LEFT)
         Spinbox(r1, from_=0.1, to=4.0, increment=0.1, textvariable=self.sy, width=6).pack(side=LEFT, padx=4)
         self.interp = StringVar(value="bilinear")
-        ttk.Combobox(r1, values=["nearest","bilinear","bicubic"], textvariable=self.interp, width=8).pack(side=LEFT)
+        ttk.Combobox(r1, values=["nearest", "bilinear", "bicubic"], textvariable=self.interp, width=8).pack(side=LEFT)
         Button(r1, text="Resize", command=self._m3_scale).pack(side=LEFT, padx=3)
 
         r2 = Frame(frm); r2.pack(anchor="w", fill=X, pady=3)
@@ -358,7 +385,8 @@ class App(Tk):
 
     def _m3_scale(self):
         if not self._require_image(): return
-        self.result = M3.scale(self.original.copy(), float(self.sx.get()), float(self.sy.get()), self.interp.get())
+        self.result = M3.scale(self.original.copy(), float(self.sx.get()),
+                               float(self.sy.get()), self.interp.get())
         self._refresh_panels()
 
     def _m3_rotate(self):
@@ -371,5 +399,24 @@ class App(Tk):
         self.result = M3.radial_correction(self.original.copy(), float(self.k1.get()), 0.0)
         self._refresh_panels()
 
+    # ---------- Module 4 ----------
+    def _build_module4(self, parent):
+        frm = Frame(parent)
+        Button(frm, text="Recognize Action", command=self._m4_predict_action).pack(side=LEFT, padx=5, pady=5)
+        return frm
+
+    def _m4_predict_action(self):
+        if not self._require_image(): return
+        output, label = M4.detect_pose_and_label(self.original.copy())
+        self.result = output
+        self.status.set(f"Detected action: {label}")
+        self._refresh_panels()
+
+
 if __name__ == "__main__":
+    from modules import module4_action as M4
+    print("Preloading MediaPipe Pose model...")
+    M4.warmup_pose()      # ensures instant response during demo
+    print("Model ready! Starting GUI...\n")
+
     App().mainloop()
